@@ -1,128 +1,17 @@
-name: Dependabot auto-merge (reusable)
+# Managed by prq (`prq bootstrap`). Policy lives in the reusable workflow:
+# https://github.com/renezander030/.github/blob/main/.github/workflows/dependabot-auto-merge.yml
+# Edit policy there, not here.
+name: Dependabot auto-merge
 
-# Central policy for every renezander030 repo. Callers are ~12 lines and just
-# point here, so a policy change is one edit in one file.
-#
-# Policy: merge dependabot patch + minor once every OTHER check on the head SHA
-# is green. Majors are never merged automatically.
-#
-# Why the hand-rolled wait loop instead of `gh pr merge --auto`: none of these
-# repos have required status checks, and GitHub's auto-merge fires immediately
-# when nothing is required. `--auto` would merge before CI reported.
+on: pull_request
 
-on:
-  workflow_call:
-    inputs:
-      allowed-update-types:
-        description: Comma-separated dependabot update-types eligible for auto-merge.
-        type: string
-        default: 'version-update:semver-patch,version-update:semver-minor'
-      merge-method:
-        description: squash | merge | rebase
-        type: string
-        default: squash
-      require-green-ci:
-        type: boolean
-        default: true
-      ci-grace-seconds:
-        description: How long to wait for a first check to appear before concluding the repo has no CI.
-        type: number
-        default: 90
-      ci-timeout-seconds:
-        type: number
-        default: 900
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
 
 jobs:
   auto-merge:
-    runs-on: ubuntu-latest
     if: github.event.pull_request.user.login == 'dependabot[bot]'
-    steps:
-      - name: Fetch Dependabot metadata
-        id: meta
-        uses: dependabot/fetch-metadata@v2
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Decide eligibility
-        id: gate
-        env:
-          ALLOWED: ${{ inputs.allowed-update-types }}
-          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
-        run: |
-          set -euo pipefail
-          case ",${ALLOWED}," in
-            *",${UPDATE_TYPE},"*) verdict=true ;;
-            *)                    verdict=false ;;
-          esac
-          echo "eligible=${verdict}" >> "$GITHUB_OUTPUT"
-          echo "update-type=${UPDATE_TYPE} eligible=${verdict}"
-
-      - name: Wait for every other check on this SHA
-        if: steps.gate.outputs.eligible == 'true' && inputs.require-green-ci
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          SHA: ${{ github.event.pull_request.head.sha }}
-          SELF_RUN_ID: ${{ github.run_id }}
-          GRACE: ${{ inputs.ci-grace-seconds }}
-          TIMEOUT: ${{ inputs.ci-timeout-seconds }}
-        run: |
-          set -euo pipefail
-          now() { date +%s; }
-          deadline=$(( $(now) + TIMEOUT ))
-          grace_until=$(( $(now) + GRACE ))
-
-          while :; do
-            # Exclude our own run, otherwise this waits on itself forever.
-            runs=$(gh api "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100" \
-              --jq "[.workflow_runs[] | select(.id != ${SELF_RUN_ID}) | {name, status, conclusion}]")
-
-            total=$(jq 'length' <<<"$runs")
-            pending=$(jq '[.[] | select(.status != "completed")] | length' <<<"$runs")
-            bad=$(jq '[.[] | select(.conclusion != null and (.conclusion | IN("success","skipped","neutral") | not))] | length' <<<"$runs")
-
-            if [ "$bad" -gt 0 ]; then
-              echo "::error::a check on this PR did not succeed, refusing to auto-merge"
-              jq -r '.[] | select(.conclusion != null and (.conclusion | IN("success","skipped","neutral") | not)) | "  NOT GREEN: \(.name) -> \(.conclusion)"' <<<"$runs"
-              exit 1
-            fi
-
-            if [ "$total" -eq 0 ]; then
-              if [ "$(now)" -ge "$grace_until" ]; then
-                echo "no other workflow runs for ${SHA} after ${GRACE}s, treating this repo as having no CI"
-                break
-              fi
-            elif [ "$pending" -eq 0 ]; then
-              echo "all ${total} other run(s) green"
-              break
-            fi
-
-            if [ "$(now)" -ge "$deadline" ]; then
-              echo "::error::timed out after ${TIMEOUT}s waiting for checks"
-              exit 1
-            fi
-            sleep 10
-          done
-
-      - name: Merge
-        if: steps.gate.outputs.eligible == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          METHOD: ${{ inputs.merge-method }}
-        run: |
-          set -euo pipefail
-          state=$(gh pr view "$PR_URL" --json mergeable --jq '.mergeable')
-          if [ "$state" = "CONFLICTING" ]; then
-            echo "::error::PR is conflicting, leaving it for dependabot to rebase"
-            exit 1
-          fi
-          gh pr merge "--${METHOD}" --delete-branch "$PR_URL"
-
-      - name: Explain why it was left alone
-        if: steps.gate.outputs.eligible != 'true'
-        env:
-          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
-        run: |
-          echo "update-type '${UPDATE_TYPE}' is outside the auto-merge allow-list."
-          echo "Leaving this PR open for manual review. This is the intended behaviour for majors."
+    uses: renezander030/.github/.github/workflows/dependabot-auto-merge.yml@main
+    secrets: inherit
